@@ -196,28 +196,61 @@ def post(body):
     return r.ok
 
 
-def run_rain():
-    """Baja la lluvia más reciente (probando candidatos) y la envía. Devuelve True si se envió."""
+def sat_rain():
+    """(q, meta, scan_dt) del satélite probando candidatos; None si ninguno sirve."""
     for bucket, key in rain_candidates()[:4]:
         st = scan_time(key)
         age = (datetime.now(timezone.utc) - st).total_seconds() / 60
         src = "nuevo" if "enterprise" in bucket else "viejo"
         log(f"lluvia [{src}]:", key.split("/")[-1], f"edad {age:.0f} min")
         if age > RAIN_MAX_AGE_MIN:
-            log("lluvia: demasiado vieja, no se envía"); return False
+            log("lluvia: demasiado vieja"); return None
         try:
             r = requests.get(f"{bucket}/{key}", timeout=120)
             r.raise_for_status()
             with h5py.File(io.BytesIO(r.content), "r") as f:
                 q, meta = build_rain_grid(f)
+            return q, meta, st
         except Exception as e:
             log(f"lluvia [{src}] falló: {e}")
-            continue
-        body = payload(q, meta, st.strftime("%Y-%m-%dT%H:%M:%SZ"), kind="rain")
-        log(f"lluvia grilla {meta['ny']}x{meta['nx']}, con lluvia {np.mean(q > 0)*100:.2f}%, máx {q.max()*RAIN_STEP_MMH:.1f} mm/h, {len(body['data'])//1024} KB")
-        return post(body)
     log("lluvia: ningún candidato sirvió")
-    return False
+    return None
+
+
+def run_rain():
+    """Lluvia = satélite (RRQPE) + radar SMN Bolívar donde alcanza (el radar manda). True si se envió."""
+    sat = sat_rain()
+    rad = None
+    try:
+        import radar
+        got = radar.latest()
+        if got:
+            rt, png = got
+            ny, nx = (sat[1]["ny"], sat[1]["nx"]) if sat else (round((LAT_N - LAT_S) / STEP), round((LON_E - LON_W) / STEP))
+            mm, cov = radar.radar_grid(png, LAT_N, LON_W, STEP, ny, nx)
+            rad = (np.clip(np.rint(mm / RAIN_STEP_MMH), 0, 255).astype(np.uint8), cov, rt)
+            log(f"radar SMN {rt:%H:%M}Z: celdas con lluvia {int((mm > 0.5).sum())}, máx {mm.max():.1f} mm/h")
+    except Exception as e:
+        log(f"radar SMN falló (se sigue con satélite): {e}")
+    if not sat and not rad:
+        return False
+    if sat:
+        q, meta, st = sat
+    else:
+        ny, nx = rad[0].shape
+        q = np.zeros((ny, nx), np.uint8)
+        meta = {"lat0": LAT_N, "lon0": LON_W, "step": STEP, "ny": ny, "nx": nx, "scale": RAIN_STEP_MMH}
+        st = rad[2]
+    if rad:
+        q = np.where(rad[1], rad[0], q)
+        st = rad[2]
+    body = payload(q, meta, st.strftime("%Y-%m-%dT%H:%M:%SZ"), kind="rain")
+    if rad:
+        body["product"] = "RRQPE+RMA14" if sat else "RMA14"
+        import radar as _r
+        body["radar"] = {"lat": _r.RADAR_LAT, "lon": _r.RADAR_LON, "rKm": _r.USE_KM}
+    log(f"lluvia grilla {meta['ny']}x{meta['nx']}, con lluvia {np.mean(q > 0)*100:.2f}%, máx {q.max()*RAIN_STEP_MMH:.1f} mm/h, {len(body['data'])//1024} KB, fuente {body.get('product')}")
+    return post(body)
 
 
 def inspect(path):
