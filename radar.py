@@ -117,6 +117,31 @@ def radar_grid(png_bytes, lat0, lon0, step, ny, nx):
     return mm, cov
 
 
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/130.0.0.0 Safari/537.36")
+HEADER_VARIANTS = [
+    {"User-Agent": UA, "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "Accept-Language": "es-AR,es;q=0.9"},
+    {"User-Agent": UA, "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "Accept-Language": "es-AR,es;q=0.9",
+     "Referer": "https://meteo.deroweb.com.ar/"},
+    {"User-Agent": UA, "Accept": "image/*,*/*;q=0.8", "Referer": "https://www.smn.gob.ar/"},
+]
+
+
+def download(url):
+    """Baja el PNG probando cabeceras distintas (el SMN rechaza clientes que no parecen navegador)."""
+    last = None
+    for i, h in enumerate(HEADER_VARIANTS):
+        try:
+            r = requests.get(url, headers=h, timeout=60)
+            if r.ok and r.content[:4] == b"\x89PNG":
+                if i: print(f"radar: anduvo con la variante de cabeceras {i}", flush=True)
+                return r.content
+            last = f"{r.status_code} {r.headers.get('server', '')} {r.headers.get('content-type', '')} {len(r.content)}B"
+        except Exception as e:
+            last = str(e)
+    raise RuntimeError(last)
+
+
 def latest(now=None):
     """(tiempo, bytes) de la imagen más reciente que se pueda bajar y no sea vieja; None si no hay."""
     now = now or datetime.now(timezone.utc)
@@ -125,8 +150,7 @@ def latest(now=None):
         if age > MAX_AGE_MIN:
             print(f"radar: la más nueva tiene {age:.0f} min, muy vieja", flush=True); return None
         try:
-            r = requests.get(url, timeout=60); r.raise_for_status()
-            return t, r.content
+            return t, download(url)
         except Exception as e:
-            print(f"radar: falló {url}: {e}", flush=True)
+            print(f"radar: falló {url.split('/')[-1]}: {e}", flush=True)
     return None
